@@ -11,6 +11,7 @@ using System.Text;
 using System.IO;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 
 namespace Hangfire.StackTrace
@@ -22,16 +23,26 @@ namespace Hangfire.StackTrace
         private static readonly object _lockObject = new object();
         private static PropertyInfo _jobId; // = typeof(JobDetailsPage).GetTypeInfo().GetDeclaredProperty("JobId");
 
-        private static readonly Func<string, string> Environment_GetResourceString;
+        private static Func<string, string> GetResourceString;
+
+        private static readonly Regex FileAndLine = new Regex(
+            @"^\s+( # .NET style:
+                (?<in>\w+)\s+(?<file>.+):\w+\s+(?<line>\d+)
+                  | # Mono style:
+                (\[(?<addr>.+)\]\s+)?
+                (?<in>\w+)\s+\<(?<file>.+)\>:(?<line>\d+)       
+            )\s*$",
+            RegexOptions.ExplicitCapture | 
+            RegexOptions.IgnorePatternWhitespace | 
+            RegexOptions.CultureInvariant | 
+            RegexOptions.Compiled
+        );
 
         static FailedStateRenderer()
         {
-            var grs = typeof(Environment)
-                .GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-                .Where(x => x.Name == "GetResourceString" && x.GetParameters().Length == 1)
-                .SingleOrDefault();
+            var method = typeof(Environment).GetMethod("GetResourceFromDefault", BindingFlags.NonPublic | BindingFlags.Static);
             
-            Environment_GetResourceString = grs?.CreateDelegate(typeof(Func<string, string>)) as Func<string, string>;
+            GetResourceString = method?.CreateDelegate(typeof(Func<string, string>)) as Func<string, string>;
         }
 
         private static void SetCurrentCulture(CultureInfo value)
@@ -88,7 +99,8 @@ namespace Hangfire.StackTrace
                 currentUICulture = connection.GetJobParameter(jobId, "CurrentUICulture");
             }
 
-            // Set the same culture as it was the moment the exception occured
+            // Set the same culture as when the exception has occurred
+            // (needed for a locale-specific resource lookup).
 
             var prevCulture = CultureInfo.CurrentCulture;
             if (!string.IsNullOrEmpty(currentCulture))
@@ -119,23 +131,27 @@ namespace Hangfire.StackTrace
             if (jobData != null && jobData.Job != null)
             {
                 // Load the assembly containing job type to make types resolvable
-                TypeCache.LoadAssembly(jobData.Job.Type.GetTypeInfo().Assembly);
+                try
+                {
+                    TypeCache.LoadAssembly(jobData.Job.Type.GetTypeInfo().Assembly);
+                }
+                catch
+                {
+                    // ignore any possible exceptions
+                }
             }
             
-            var endOfInnerExceptionStack = "End of inner exception stack trace";
-            var endStackTraceFromPreviousThrow = "End of stack trace from previous location where exception was thrown";
-            var at = "at";
-            var inFileLineNumber = "in {0}:line {1}";
-
-            if (Environment_GetResourceString != null)
+            var endOfInnerExceptionStack = "--- End of inner exception stack trace ---";
+            var endStackTraceFromPreviousThrow = "--- End of stack trace from previous location where exception was thrown ---";
+            
+            if (GetResourceString != null)
             {
-                endOfInnerExceptionStack = Environment_GetResourceString("Exception_EndOfInnerExceptionStack");
-                endStackTraceFromPreviousThrow = Environment_GetResourceString("Exception_EndStackTraceFromPreviousThrow");
-                at = Environment_GetResourceString("Word_At");
-                inFileLineNumber = Environment_GetResourceString("StackTrace_InFileLineNumber");
+                endOfInnerExceptionStack = GetResourceString("Exception_EndOfInnerExceptionStack");
+                endStackTraceFromPreviousThrow = GetResourceString("Exception_EndStackTraceFromPreviousThrow");
             }
 
             var buffer = new StringBuilder(stackTrace.Length * 3);
+            var skipReThrow = false;
 
             using (var reader = new StringReader(stackTrace))
             using (var writer = new StringWriter(buffer))
@@ -149,8 +165,31 @@ namespace Hangfire.StackTrace
                         // Failed to parse this line as a stack frame.
                         // This may be exception message, inner stack trace separator etc.
 
-                        // Write line "as is"
-                        writer.WriteLine(WebUtility.HtmlDecode(line));
+                        var trimmed = line.Trim();
+
+                        if (trimmed == endOfInnerExceptionStack)
+                        {
+                            // Boundary between inner and outer exceptions.
+                            writer.WriteLine("<i style='color:#999'>{0}</i>", WebUtility.HtmlEncode(line));
+                            
+                            if (exceptionIndex != -1)
+                            {
+                                WriteExceptionMessage(writer, exceptionMessages[++exceptionIndex], false);
+                            }
+                            continue;
+                        }
+
+                        if (trimmed == endStackTraceFromPreviousThrow)
+                        {
+                            // This is a boundary between exception re-throws, re-throw statement follows.
+                            // We can pretty much ignore this, to keep the stack trace cleaner. 
+                            // Anyways, we're only interested in where the exception was originally thrown.
+                            skipReThrow = true;
+                            continue;
+                        }
+                                
+                        // Other unknown lines are written "as is"
+                        writer.WriteLine(WebUtility.HtmlEncode(line));
                         continue;
                     }
 
@@ -161,7 +200,19 @@ namespace Hangfire.StackTrace
                     {
                         MethodBase[] methods = null;
 
-                        // exclude some unwanted types early
+                        // Exclude some unwanted types:
+
+                        if (skipReThrow)
+                        {
+                            skipReThrow = false;
+
+                            if (typeof(ExceptionDispatchInfo) == type && frame.MethodName == "Throw")
+                            {
+                                // Re-throw statement, following the re-throw boundary
+                                skipReThrow = false;
+                                continue;
+                            }
+                        }
 
                         if (typeof(INotifyCompletion).IsAssignableFrom(type))
                         {
@@ -169,18 +220,16 @@ namespace Hangfire.StackTrace
                             continue;
                         }
 
-                        if (type.IsNested && 
-                            type.GetTypeInfo().GetCustomAttribute<CompilerGeneratedAttribute>() != null)
+                        if (type.IsNested && type.GetTypeInfo().GetCustomAttribute<CompilerGeneratedAttribute>() != null)
                         {
-                            // Check if the type is a state machine
-                            //
+                            // Check if the type is a state machine.
                             // State machines are compiler-generated nested classes named like <xyz>d__123,
-                            // where 'xyz' refers to a method of the parent class it is generated for.
+                            // where 'xyz' refers to a method of the parent class it was generated for.
 
-                            var methodName = StackFrame.GetOriginalName(type.Name);
+                            var methodName = StackFrame.DecodeOriginalName(type.Name);
                             if (!string.IsNullOrEmpty(methodName))
                             {
-                                // Find a method of the parent class with matchin name and state machine type.
+                                // Find a method of the parent class with matching name and state machine type.
                                 // There should be a single method matching this criteria, as state machines are unique.
 
                                 methods = type.DeclaringType.FindMethods(methodName,
@@ -190,34 +239,36 @@ namespace Hangfire.StackTrace
                                 {
                                     type = type.DeclaringType;
 
-                                    // Determine type of the state machine
                                     var attr = methods[0].GetCustomAttribute<StateMachineAttribute>();
                                     if (attr is AsyncStateMachineAttribute)
+                                    {
+                                        // Async state machine in await
                                         stateMachineMethod = "await";
+                                    }
                                     else if (attr is IteratorStateMachineAttribute)
+                                    {
+                                        // Iterator state machine in yield
                                         stateMachineMethod = "yield";
+                                    }
                                 }
                             }
                         }
 
-                        // Do basic method lookup
+                        // Default method lookup, if no special one was already done
 
                         if (methods == null)
                         {
                             methods = type.FindMethods(frame.MethodName, method =>
                             {
-                                var fp = frame.Parameters;
-                                var mp = method.GetParameters();
+                                var x = method.GetParameters();
+                                var y = frame.Parameters;
 
-                                if (mp.Length != fp.Length) return false;
+                                if (x.Length != y.Length) return false;
 
-                                for (int i = 0; i < mp.Length; i++)
+                                for (int i = 0; i < x.Length; i++)
                                 {
-                                    var t = mp[i].ParameterType;
-                                    
-                                    // Mono uses full type names, while .NET uses short ones.
-                                    // We need to check both, to be sure.
-                                    if (t.Name != fp[i].TypeName && t.FullName != fp[i].TypeName)
+                                    if (x[i].ParameterType.Name != y[i].TypeName &&     // .NET style
+                                        x[i].ParameterType.FullName != y[i].TypeName)   // Mono style
                                     {
                                         return false;
                                     }
@@ -236,11 +287,7 @@ namespace Hangfire.StackTrace
                             frame.MethodName = methods[0].GetFormattedName();
 
                             frame.Parameters = methods[0].GetParameters()
-                                .Select(p => new StackFrame.Parameter()
-                                {
-                                    TypeName = p.ParameterType.GetFormattedName(false),
-                                    Name = p.Name
-                                })
+                                .Select(p => new StackFrame.Parameter(p.ParameterType.GetFormattedName(false), p.Name))
                                 .ToArray();
                         }
                     }
@@ -266,13 +313,31 @@ namespace Hangfire.StackTrace
                     }
                     writer.Write(')');
 
-                    writer.WriteLine(WebUtility.HtmlEncode(frame.Suffix));
+                    WriteFileAndLine(writer, frame.Suffix);
                 }
             }
 
             return buffer.ToString();
         }
-        
-        
+
+        private void WriteFileAndLine(StringWriter writer, string suffix)
+        {
+            var match = FileAndLine.Match(suffix);
+            if (!match.Success)
+            {
+                writer.WriteLine(suffix);
+                return;
+            }
+
+            var file = match.Groups["file"].Value;
+
+            // TODO: shorten file path?
+
+            if (match.Groups["addr"].Success)
+                writer.Write(" [{0}]", WebUtility.HtmlEncode(match.Groups["addr"].Value));
+
+            writer.WriteLine(" {0} <span class='st-file'>{1}</span>:<span class='st-line'>{2}</span>", 
+                WebUtility.HtmlEncode(match.Groups["in"].Value), WebUtility.HtmlEncode(file), match.Groups["line"].Value);
+        }
     }
 }

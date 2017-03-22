@@ -63,6 +63,13 @@ namespace Hangfire.StackTrace
 #endif
         }
 
+        private readonly bool _separateStackTraces;
+
+        public FailedStateRenderer(bool separateStackTraces = true)
+        {
+            _separateStackTraces = separateStackTraces;
+        }
+
         public NonEscapedString Render(HtmlHelper html, IDictionary<string, string> stateData)
         {
             // HtmlHelper._page field contains reference to a RazorPage being rendered
@@ -115,7 +122,7 @@ namespace Hangfire.StackTrace
                 return new NonEscapedString(
                     $"<h4 class=\"exception-type\">{WebUtility.HtmlEncode(stateData["ExceptionType"])}</h4>" +
                     $"<p class=\"text-muted\">{WebUtility.HtmlEncode(stateData["ExceptionMessage"])}</p>" +
-                    $"<pre class=\"stack-trace\">{RenderStackTrace(jobData, stateData["ExceptionDetails"])}</pre>");
+                    RenderStackTrace(jobData, stateData["ExceptionDetails"]));
             }
             finally
             {
@@ -153,9 +160,16 @@ namespace Hangfire.StackTrace
             var buffer = new StringBuilder(stackTrace.Length * 3);
             var skipReThrow = false;
 
+            var processingFirstLine = true;
+            StringBuilder firstLineBuffer = null;
+            string[] exceptionMessages = null;
+            var exceptionMessageIndex = -1;
+
             using (var reader = new StringReader(stackTrace))
             using (var writer = new StringWriter(buffer))
             {
+                writer.WriteLine("<pre class=\"stack-trace\">");
+
                 string line;
                 while (null != (line = reader.ReadLine()))
                 {
@@ -165,17 +179,27 @@ namespace Hangfire.StackTrace
                         // Failed to parse this line as a stack frame.
                         // This may be exception message, inner stack trace separator etc.
 
+                        if (processingFirstLine)
+                        {
+                            // Collect message lines before first stack frame
+                            if (firstLineBuffer == null)
+                                firstLineBuffer = new StringBuilder();
+                            firstLineBuffer.AppendLine(line);
+                            continue;
+                        }
+
                         var trimmed = line.Trim();
 
                         if (trimmed == endOfInnerExceptionStack)
                         {
-                            // Boundary between inner and outer exceptions.
-                            writer.WriteLine("<i class=\"text-muted\">{0}</i>", WebUtility.HtmlEncode(line));
-
-                            if (exceptionIndex != -1)
+                            // This is a boundary between inner and outer exceptions.
+                            if (exceptionMessageIndex >= 0)
                             {
-                                WriteExceptionMessage(writer, exceptionMessages[++exceptionIndex], false);
+                                exceptionMessageIndex++;
+                                WriteExceptionMessage(writer, exceptionMessages[exceptionMessageIndex], exceptionMessageIndex);
                             }
+                            else
+                                writer.WriteLine("<i class=\"text-muted\">{0}</i>", WebUtility.HtmlEncode(line));
                             continue;
                         }
 
@@ -191,6 +215,58 @@ namespace Hangfire.StackTrace
                         // Other unknown lines are written "as is"
                         writer.WriteLine(WebUtility.HtmlEncode(line));
                         continue;
+                    }
+
+                    if (processingFirstLine)
+                    {
+                        if (firstLineBuffer != null)
+                        {
+                            // First line contains all exception types and messages:
+                            // Type1: message 1 ---> Type2: message 2 ---> ...
+                            // (can actually span across multiple lines if exception messages contain line breaks)
+                            var firstLine = firstLineBuffer.ToString().TrimEnd('\r', '\n');
+
+                            // We want to write each exception message before its stack trace:
+                            // Type2: message 2
+                            //    at ...
+                            //    at ...
+                            //    --- End of inner exception stack trace ---
+                            // Type1: message 1
+                            //    at ...
+                            //    at ...
+
+                            exceptionMessages = StackFrame.SplitExceptionMessages(firstLine);
+                            
+                            // Since individual exception messages may have ' ---> ' inside, 
+                            // we can't be sure we've split them correctly without second check.
+
+                            // To get the correct number, we'll count inner exception stack end marks.
+                            // number of exceptions = number of inner exception ends + 1
+                            var numberOfInnerExceptions = Regex.Matches(
+                                stackTrace.Substring(firstLine.Length),
+                                $@"^\s*{Regex.Escape(endOfInnerExceptionStack)}\s*$", 
+                                RegexOptions.Multiline).Count;
+
+                            if (exceptionMessages.Length == numberOfInnerExceptions + 1)
+                            {
+                                Array.Reverse(exceptionMessages);
+
+                                // Clear already written 'pre'
+                                writer.Flush();
+                                buffer.Clear();
+
+                                exceptionMessageIndex = 0;
+                                WriteExceptionMessage(writer, exceptionMessages[exceptionMessageIndex], exceptionMessageIndex);
+                            }
+                            else
+                            {
+                                // Numbers don't match, forget it!
+                                // Write the entire first line intact, as it used to be.
+                                writer.WriteLine(WebUtility.HtmlEncode(firstLine));
+                            }
+                        }
+
+                        processingFirstLine = false;
                     }
 
                     string stateMachineMethod = null;
@@ -307,17 +383,46 @@ namespace Hangfire.StackTrace
                             writer.Write(", ");
 
                         writer.Write("<span class=\"st-param\">");
-                        writer.Write("<span class=\"st-param-type\">{0}</span>&nbsp;", WebUtility.HtmlEncode(frame.Parameters[i].TypeName));
-                        writer.Write("<span class=\"st-param-name\">{0}</span>", WebUtility.HtmlEncode(frame.Parameters[i].Name));
+                        writer.Write("<span class=\"st-param-type\">{0}</span>&nbsp;", 
+                                     WebUtility.HtmlEncode(frame.Parameters[i].TypeName));
+                        writer.Write("<span class=\"st-param-name\">{0}</span>", 
+                                     WebUtility.HtmlEncode(frame.Parameters[i].Name));
                         writer.Write("</span>");
                     }
                     writer.Write(')');
 
                     WriteFileAndLine(writer, frame.Suffix);
                 }
+
+                writer.WriteLine("</pre>");
             }
 
             return buffer.ToString();
+        }
+
+        private void WriteExceptionMessage(StringWriter writer, string message, int index)
+        {
+            if (string.IsNullOrEmpty(message))
+                throw new ArgumentNullException(nameof(message));
+
+            var p = message.IndexOf(": ");
+            if (p == -1)
+                throw new ArgumentException("Invalid message", nameof(message));
+
+            var type = message.Substring(0, p);
+            message = message.Substring(p + 2);
+
+            if (index > 0)
+                writer.WriteLine("</pre>");
+
+            writer.WriteLine("<hr style=\"border-top:1px dashed #999; margin:10px 0\"/>");
+
+            writer.WriteLine("<p>");
+            writer.WriteLine("<span class=\"st-type\">{0}</span>: ", WebUtility.HtmlEncode(type));
+            writer.WriteLine("<span class=\"text-muted\">{0}</span>", WebUtility.HtmlEncode(message));
+            writer.WriteLine("</p>");
+
+            writer.WriteLine("<pre class=\"stack-trace\" style=\"font-weight:normal !important\">");
         }
 
         private void WriteFileAndLine(StringWriter writer, string suffix)

@@ -137,5 +137,20 @@ namespace Hangfire.StackTrace
 
             return match.Success ? match.Groups["name"].Value : null;
         }
+
+        private static readonly Regex ExceptionBoundary = new Regex(
+            $@"\s--->\s(?={FullTypeName}:\s)", 
+            RegexOptions.ExplicitCapture | 
+            RegexOptions.IgnorePatternWhitespace | 
+            RegexOptions.CultureInvariant | 
+            RegexOptions.Compiled);
+
+        public static string[] SplitExceptionMessages(string line)
+        {
+            if (string.IsNullOrEmpty(line))
+                throw new ArgumentNullException(nameof(line));
+
+            return ExceptionBoundary.Split(line);
+        }
     }
 }

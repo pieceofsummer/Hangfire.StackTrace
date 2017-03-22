@@ -170,8 +170,8 @@ namespace Hangfire.StackTrace
                         if (trimmed == endOfInnerExceptionStack)
                         {
                             // Boundary between inner and outer exceptions.
-                            writer.WriteLine("<i style='color:#999'>{0}</i>", WebUtility.HtmlEncode(line));
-                            
+                            writer.WriteLine("<i class=\"text-muted\">{0}</i>", WebUtility.HtmlEncode(line));
+
                             if (exceptionIndex != -1)
                             {
                                 WriteExceptionMessage(writer, exceptionMessages[++exceptionIndex], false);
@@ -295,9 +295,9 @@ namespace Hangfire.StackTrace
                     writer.Write(WebUtility.HtmlEncode(frame.Prefix));
 
                     if (stateMachineMethod != null)
-                        writer.Write("<span style='color:#00f'>{0}</span> ", stateMachineMethod);
+                        writer.Write("<span style=\"color:#00f\">{0}</span> ", stateMachineMethod);
 
-                    writer.Write("<span class='st-type'>{0}</span>.<span class='st-method'>{1}</span>", 
+                    writer.Write("<span class=\"st-type\">{0}</span>.<span class=\"st-method\">{1}</span>", 
                                  WebUtility.HtmlEncode(frame.TypeName), WebUtility.HtmlEncode(frame.MethodName));
                     
                     writer.Write('(');
@@ -306,9 +306,9 @@ namespace Hangfire.StackTrace
                         if (i > 0)
                             writer.Write(", ");
 
-                        writer.Write("<span class='st-param'>");
-                        writer.Write("<span class='st-param-type'>{0}</span>&nbsp;", WebUtility.HtmlEncode(frame.Parameters[i].TypeName));
-                        writer.Write("<span class='st-param-name'>{0}</span>", WebUtility.HtmlEncode(frame.Parameters[i].Name));
+                        writer.Write("<span class=\"st-param\">");
+                        writer.Write("<span class=\"st-param-type\">{0}</span>&nbsp;", WebUtility.HtmlEncode(frame.Parameters[i].TypeName));
+                        writer.Write("<span class=\"st-param-name\">{0}</span>", WebUtility.HtmlEncode(frame.Parameters[i].Name));
                         writer.Write("</span>");
                     }
                     writer.Write(')');
@@ -336,7 +336,7 @@ namespace Hangfire.StackTrace
             if (match.Groups["addr"].Success)
                 writer.Write(" [{0}]", WebUtility.HtmlEncode(match.Groups["addr"].Value));
 
-            writer.WriteLine(" {0} <span class='st-file'>{1}</span>:<span class='st-line'>{2}</span>", 
+            writer.WriteLine(" {0} <span class=\"st-file\">{1}</span>:<span class=\"st-line\">{2}</span>", 
                 WebUtility.HtmlEncode(match.Groups["in"].Value), WebUtility.HtmlEncode(file), match.Groups["line"].Value);
         }
     }

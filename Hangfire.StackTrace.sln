@@ -1,16 +1,11 @@
-﻿
+
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 14
-VisualStudioVersion = 14.0.25420.1
+# Visual Studio 15
+VisualStudioVersion = 15.0.26114.2
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{878685BC-A14B-40E7-94C6-811515A73926}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{1B96138B-355A-4D90-A618-401552AF4DB6}"
-	ProjectSection(SolutionItems) = preProject
-		global.json = global.json
-	EndProjectSection
-EndProject
-Project("{8BB2217D-0F2D-49D1-97BC-3654ED321F3B}") = "Hangfire.StackTrace", "src\Hangfire.StackTrace\Hangfire.StackTrace.xproj", "{2B78C86F-F85D-424B-8BA0-A34CAF728430}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hangfire.StackTrace", "src\Hangfire.StackTrace\Hangfire.StackTrace.csproj", "{2B78C86F-F85D-424B-8BA0-A34CAF728430}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{A7C36DA8-1231-4072-925E-D088DCC0666B}"
 EndProject

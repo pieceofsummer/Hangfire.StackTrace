@@ -13,6 +13,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
+using Hangfire.Common;
 
 namespace Hangfire.StackTrace
 {
@@ -102,8 +103,8 @@ namespace Hangfire.StackTrace
             using (var connection = page.Storage.GetConnection())
             {
                 jobData = connection.GetJobData(jobId);
-                currentCulture = connection.GetJobParameter(jobId, "CurrentCulture");
-                currentUICulture = connection.GetJobParameter(jobId, "CurrentUICulture");
+                currentCulture = JobHelper.FromJson<string>(connection.GetJobParameter(jobId, "CurrentCulture"));
+                currentUICulture = JobHelper.FromJson<string>(connection.GetJobParameter(jobId, "CurrentUICulture"));
             }
 
             // Set the same culture as when the exception has occurred

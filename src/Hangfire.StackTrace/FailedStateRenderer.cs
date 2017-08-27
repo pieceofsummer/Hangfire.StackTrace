@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Threading.Tasks;
 using Hangfire.Dashboard;
 using System.Reflection;
 using System.Diagnostics;
@@ -19,12 +18,10 @@ namespace Hangfire.StackTrace
 {
     internal class FailedStateRenderer
     {
-        private static readonly FieldInfo _page = typeof(HtmlHelper).GetTypeInfo().GetDeclaredField("_page");
+        private static readonly FieldInfo HtmlHelperPageField;
+        private static readonly PropertyInfo JobDetailsPageJobIdProperty;
 
-        private static readonly object _lockObject = new object();
-        private static PropertyInfo _jobId; // = typeof(JobDetailsPage).GetTypeInfo().GetDeclaredProperty("JobId");
-
-        private static Func<string, string> GetResourceString;
+        private static readonly Func<string, string> GetResourceString;
 
         private static readonly Regex FileAndLine = new Regex(
             @"^\s+( # .NET style:
@@ -41,6 +38,14 @@ namespace Hangfire.StackTrace
 
         static FailedStateRenderer()
         {
+            var htmlHelperTypeInfo = typeof(HtmlHelper).GetTypeInfo();
+            
+            HtmlHelperPageField = htmlHelperTypeInfo.GetDeclaredField("_page");
+            
+            JobDetailsPageJobIdProperty = htmlHelperTypeInfo.Assembly
+                .GetType("Hangfire.Dashboard.Pages.JobDetailsPage")
+                .GetRuntimeProperty("JobId");
+            
             var method = typeof(Environment).GetMethod("GetResourceFromDefault", BindingFlags.NonPublic | BindingFlags.Static);
             
             GetResourceString = method?.CreateDelegate(typeof(Func<string, string>)) as Func<string, string>;
@@ -55,6 +60,7 @@ namespace Hangfire.StackTrace
 #endif
         }
 
+        // ReSharper disable once InconsistentNaming
         private static void SetCurrentUICulture(CultureInfo value)
         {
 #if NET45
@@ -74,30 +80,17 @@ namespace Hangfire.StackTrace
         public NonEscapedString Render(HtmlHelper html, IDictionary<string, string> stateData)
         {
             // HtmlHelper._page field contains reference to a RazorPage being rendered
-            var page = (RazorPage)_page.GetValue(html);
+            var page = (RazorPage)HtmlHelperPageField.GetValue(html);
             Debug.Assert(page != null);
 
-            // JobDetailsPage.JobId contains identifier of a parent job
-            // Unfortunately, JobDetailsPage class itself is not public,
-            // so we need to resolve it at runtime from page instance
-            
-            if (_jobId == null)
-            {
-                lock (_lockObject)
-                {
-                    if (_jobId == null)
-                    {
-                        _jobId = page.GetType().GetTypeInfo().GetDeclaredProperty("JobId");
-                    }
-                }
-            }
-            
-            var jobId = (string)_jobId.GetValue(page);
+            // state renderers shouldn't run elsewhere except JobDetailsPage
+            var jobId = (string)JobDetailsPageJobIdProperty.GetValue(page);
             Debug.Assert(!string.IsNullOrEmpty(jobId));
 
             // Read job information by id
 
             JobData jobData;
+            // ReSharper disable once InconsistentNaming
             string currentCulture, currentUICulture;
 
             using (var connection = page.Storage.GetConnection())
@@ -114,6 +107,7 @@ namespace Hangfire.StackTrace
             if (!string.IsNullOrEmpty(currentCulture))
                 SetCurrentCulture(new CultureInfo(currentCulture));
 
+            // ReSharper disable once InconsistentNaming
             var prevUICulture = CultureInfo.CurrentUICulture;
             if (!string.IsNullOrEmpty(currentUICulture))
                 SetCurrentUICulture(new CultureInfo(currentUICulture));
@@ -136,7 +130,7 @@ namespace Hangfire.StackTrace
         {
             if (string.IsNullOrEmpty(stackTrace)) return "";
 
-            if (jobData != null && jobData.Job != null)
+            if (jobData?.Job != null)
             {
                 // Load the assembly containing job type to make types resolvable
                 try
@@ -161,7 +155,7 @@ namespace Hangfire.StackTrace
             var buffer = new StringBuilder(stackTrace.Length * 3);
             var skipReThrow = false;
 
-            var processingFirstLine = true;
+            var processingFirstLine = _separateStackTraces;
             StringBuilder firstLineBuffer = null;
             string[] exceptionMessages = null;
             var exceptionMessageIndex = -1;
@@ -197,6 +191,7 @@ namespace Hangfire.StackTrace
                             if (exceptionMessageIndex >= 0)
                             {
                                 exceptionMessageIndex++;
+                                // ReSharper disable once PossibleNullReferenceException
                                 WriteExceptionMessage(writer, exceptionMessages[exceptionMessageIndex], exceptionMessageIndex);
                             }
                             else
@@ -286,7 +281,6 @@ namespace Hangfire.StackTrace
                             if (typeof(ExceptionDispatchInfo) == type && frame.MethodName == "Throw")
                             {
                                 // Re-throw statement, following the re-throw boundary
-                                skipReThrow = false;
                                 continue;
                             }
                         }
@@ -310,6 +304,7 @@ namespace Hangfire.StackTrace
                                 // There should be a single method matching this criteria, as state machines are unique.
 
                                 methods = type.DeclaringType.FindMethods(methodName,
+                                    // ReSharper disable once AccessToModifiedClosure
                                     x => x.GetCustomAttribute<StateMachineAttribute>()?.StateMachineType == type);
 
                                 if (methods.Length == 1)
@@ -342,7 +337,8 @@ namespace Hangfire.StackTrace
 
                                 if (x.Length != y.Length) return false;
 
-                                for (int i = 0; i < x.Length; i++)
+                                // ReSharper disable once LoopCanBeConvertedToQuery
+                                for (var i = 0; i < x.Length; i++)
                                 {
                                     if (x[i].ParameterType.Name != y[i].TypeName &&     // .NET style
                                         x[i].ParameterType.FullName != y[i].TypeName)   // Mono style
@@ -406,13 +402,21 @@ namespace Hangfire.StackTrace
             if (string.IsNullOrEmpty(message))
                 throw new ArgumentNullException(nameof(message));
 
-            var p = message.IndexOf(": ");
-            if (p == -1)
-                throw new ArgumentException("Invalid message", nameof(message));
-
-            var type = message.Substring(0, p);
-            message = message.Substring(p + 2);
-
+            string type;
+            
+            var p = message.IndexOf(": ", StringComparison.Ordinal);
+            if (p < 0)
+            {
+                // type name only
+                type = message;
+                message = "";
+            }
+            else
+            {
+                type = message.Substring(0, p);
+                message = message.Substring(p + 2);
+            }
+            
             if (index > 0)
                 writer.WriteLine("</pre>");
 
